@@ -526,24 +526,6 @@ if __name__ == '__main__':
     with app.app_context():
         init_db() 
     app.run(debug=True)
-@app.route('/api/notices')
-@login_required
-def api_get_notices():
-    board_id = request.args.get('board_id')
-    page = int(request.args.get('page', 1))
-    
-    # 전달받은 아이디로 DB에서 해당 게시판 정보 찾기
-    board = Board.query.filter_by(board_id=board_id).first()
-    if not board:
-        return jsonify([])
-        
-    # 다음 페이지 크롤링해서 결과 넘겨주기
-    notices = scrape_single_site(board, page=page)
-    return jsonify(notices)
 
 
 
-if __name__ == '__main__':
-    with app.app_context():
-        init_db() 
-    app.run(debug=True)
