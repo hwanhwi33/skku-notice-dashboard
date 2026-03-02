@@ -17,6 +17,7 @@ import smtplib
 from email.mime.text import MIMEText
 import random
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
 
 # ==========================================
 # 로깅 설정
@@ -504,7 +505,7 @@ HTML_BASE = """
         {% if current_user.is_authenticated %}
             <div class="nav">
                 <span>환영합니다, <b>{{ current_user.username }}</b>님!</span>
-                {% if current_user.username == 'admin' %}
+                {% if current_user.username == 'admin환휘' %}
                     <a href="{{ url_for('admin_dashboard') }}">📊 관리자 페이지</a>
                 {% endif %}
                 <a href="{{ url_for('settings') }}">⚙️ 공지사항 설정</a>
@@ -523,10 +524,7 @@ def login():
         user = User.query.filter_by(username=request.form.get('username')).first()
         if user and check_password_hash(user.password, request.form.get('password')):
             login_user(user)
-            # 관리자는 로그인 시 전체 게시판 자동 구독
-            if user.username == 'admin':
-                user.subscriptions = Board.query.all()
-                db.session.commit()
+            # [수정] 강제 전체 구독 로직 삭제 완료
             return redirect(url_for('home'))
         return "<script>alert('아이디나 비밀번호가 틀렸습니다.'); history.back();</script>"
 
@@ -732,7 +730,19 @@ def logout():
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
 def settings():
+    # [추가] 당장 크롤링이 안 되는 학과들 숨기기 (이름에 포함된 키워드로 필터링)
+    hidden_keywords = [
+        '생명과학과','건설환경공학부', '나노공학과', '의과대학','약학대학','바이오신약규제과학과', '명륜학사', '봉룡학사', 
+        '창업지원단', '에너지학과', '영상학과', '화학공학부', '반도체융합공학과','반도체시스템공학과','화학과'
+    ]
+    
     all_boards = Board.query.all()
+    # 키워드가 포함되지 않은 게시판만 visible_boards에 담아 화면에 전달
+    visible_boards = [
+        b for b in all_boards 
+        if not any(keyword in b.name for keyword in hidden_keywords)
+    ]
+
     if request.method == 'POST':
         selected_ids = request.form.getlist('boards')
         current_user.subscriptions = [Board.query.get(int(bid)) for bid in selected_ids]
@@ -741,6 +751,12 @@ def settings():
 
     content = """
     <h1>공지사항 선택📝</h1>
+    
+    <div style="background-color: #fff3cd; color: #856404; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #ffeeba; font-size: 0.9rem; line-height: 1.5;">
+        <strong>🚨 안내:</strong> 현재 베타(Beta) 버전이며, 일부 학과는 시스템 연동 중입니다.<br>
+        (목록에 보이지 않는 학과는 안정화 후 순차적으로 추가될 예정입니다.)
+    </div>
+
     <form method="POST">
         <div class="checkbox-group">
             {% for board in boards %}
@@ -753,9 +769,15 @@ def settings():
         </div>
         <button type="submit" class="btn">저장하고 메인으로 가기</button>
     </form>
+    
+    <script>
+        if (!sessionStorage.getItem('betaAlertShown')) {
+            alert('현재 베타(Beta) 버전이며, 일부 학과는 시스템 연동 중입니다.');
+            sessionStorage.setItem('betaAlertShown', 'true');
+        }
+    </script>
     """
-    return render_template_string(HTML_BASE.replace('[[CONTENT]]', content), boards=all_boards)
-
+    return render_template_string(HTML_BASE.replace('[[CONTENT]]', content), boards=visible_boards)
 @app.route('/')
 @login_required
 def home():
@@ -771,7 +793,12 @@ def home():
 
     # 마지막 크롤링 시각 표시용
     latest_crawl = CrawlStatus.query.order_by(CrawlStatus.last_crawled.desc()).first()
-    last_updated = latest_crawl.last_crawled.strftime('%Y-%m-%d %H:%M') if latest_crawl and latest_crawl.last_crawled else '아직 크롤링 전'
+    if latest_crawl and latest_crawl.last_crawled:
+        # DB에 저장된 UTC 시간에 9시간을 더해 한국 시간(KST)으로 변환
+        kst_time = latest_crawl.last_crawled + timedelta(hours=9)
+        last_updated = kst_time.strftime('%Y-%m-%d %H:%M')
+    else:
+        last_updated = '업데이트 전'
 
     content = """
     <style>
@@ -788,7 +815,7 @@ def home():
     </style>
 
     <h1>{{ current_user.username }}'s 실시간 공지🔊</h1>
-    <p class="crawl-info">마지막 업데이트: {{ last_updated }} (30분 주기 자동 갱신)</p>
+    <p class="crawl-info" style="color: #7f8c8d; font-size: 0.85rem; text-align: center; margin-bottom: 20px;">마지막 업데이트: {{ last_updated }}</p>
 
     <div class="btn-group">
         <button class="filter-btn active" onclick="filterNotices('all', this)">전체보기</button>
@@ -910,7 +937,7 @@ def api_get_notices():
 @app.route('/admin')
 @login_required
 def admin_dashboard():
-    if current_user.username != 'admin':
+    if current_user.username != 'admin환휘':
         return "<script>alert('관리자만 접근할 수 있는 페이지입니다.'); history.back();</script>"
 
     total_users = User.query.count()
@@ -1010,7 +1037,7 @@ def admin_dashboard():
 @app.route('/admin/trigger_crawl')
 @login_required
 def trigger_crawl():
-    if current_user.username != 'admin':
+    if current_user.username != 'admin환휘':
         return "<script>alert('관리자만 접근할 수 있습니다.'); history.back();</script>"
     # 별도 스레드에서 즉시 실행
     threading.Thread(target=run_scheduled_crawl, daemon=True).start()
