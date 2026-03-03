@@ -1125,14 +1125,26 @@ def verify_code():
 
 
 # ==========================================
-# 서버 시작
+# DB 초기화 및 크롤링 스케줄러 시작
+# (gunicorn 등 외부 WSGI 서버에서도 실행되도록 모듈 레벨에서 수행)
 # ==========================================
-if __name__ == '__main__':
-    with app.app_context():
-        init_db()
+with app.app_context():
+    init_db()
 
-    # 백그라운드 크롤링 스케줄러 시작 (데몬 스레드)
+# 스케줄러 중복 실행 방지 플래그
+_scheduler_started = False
+
+def start_scheduler():
+    global _scheduler_started
+    if _scheduler_started:
+        return
+    _scheduler_started = True
     crawler_thread = threading.Thread(target=scheduler_loop, daemon=True)
     crawler_thread.start()
+    logger.info("🚀 크롤링 스케줄러 스레드가 시작되었습니다.")
 
-    app.run(debug=False, use_reloader=False)  # use_reloader=False: 스케줄러 중복 실행 방지
+# gunicorn, python app.py 모두에서 스케줄러 시작
+start_scheduler()
+
+if __name__ == '__main__':
+    app.run(debug=False, use_reloader=False)
