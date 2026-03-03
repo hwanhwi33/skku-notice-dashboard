@@ -29,10 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==========================================
-# 인증번호 임시 저장 (실서비스에서는 Redis 권장)
-# ==========================================
-verification_codes = {}
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
@@ -60,6 +57,13 @@ user_board = db.Table('user_board',
     db.Column('user_id', db.Integer, db.ForeignKey('user.id')),
     db.Column('board_id', db.Integer, db.ForeignKey('board.id'))
 )
+
+# 기존 모델 아래에 추가
+class VerificationCode(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(50), unique=True, nullable=False)
+    code = db.Column(db.String(10), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -578,8 +582,9 @@ def reset_password():
         new_password = request.form.get('new_password')
         new_password_confirm = request.form.get('new_password_confirm')
 
-        if email not in verification_codes or verification_codes[email] != auth_code:
-            return "<script>alert('비정상적인 접근입니다. 이메일 인증을 다시 해주세요.'); history.back();</script>"
+        record = VerificationCode.query.filter_by(email=email).first()
+        if not record or record.code != auth_code:
+            return "<script>alert('비정상적인 접근입니다.'); history.back();</script>"
         user = User.query.filter_by(username=username, email=email).first()
         if not user:
             return "<script>alert('입력하신 아이디와 이메일이 일치하는 정보가 없습니다.'); history.back();</script>"
@@ -589,8 +594,10 @@ def reset_password():
             return "<script>alert('비밀번호는 8자 이상이어야 하며, 특수기호를 최소 1개 이상 포함해야 합니다.'); history.back();</script>"
 
         user.password = generate_password_hash(new_password, method='scrypt')
+        # 인증 기록 삭제
+        if record:
+            db.session.delete(record) 
         db.session.commit()
-        verification_codes.pop(email, None)
         return "<script>alert('비밀번호가 성공적으로 변경되었습니다.'); window.location.href='/login';</script>"
 
     content = """
@@ -652,7 +659,9 @@ def register():
 
         if not consent: return "<script>alert('개인정보 수집 및 이용에 동의해야 가입할 수 있습니다.'); history.back();</script>"
         if not (student_id.isdigit() and len(student_id) == 2): return "<script>alert('학번은 숫자 2자리로 입력해주세요.'); history.back();</script>"
-        if email not in verification_codes or verification_codes[email] != auth_code: return "<script>alert('비정상적인 접근입니다.'); history.back();</script>"
+        record = VerificationCode.query.filter_by(email=email).first()
+        if not record or record.code != auth_code:
+            return "<script>alert('비정상적인 접근입니다.'); history.back();</script>"
         if password != password_confirm: return "<script>alert('비밀번호가 서로 일치하지 않습니다.'); history.back();</script>"
         if not is_valid_password(password): return "<script>alert('비밀번호 정책을 확인해주세요.'); history.back();</script>"
         if User.query.filter_by(username=username).first() or User.query.filter_by(email=email).first(): return "<script>alert('중복된 아이디나 이메일입니다.'); history.back();</script>"
@@ -660,7 +669,11 @@ def register():
         new_user = User(username=username, password=generate_password_hash(password, method='scrypt'), email=email, department=department, student_id=student_id)
         db.session.add(new_user)
         db.session.commit()
-        verification_codes.pop(email, None)
+        db.session.add(new_user)
+        # 인증 기록 삭제
+        if record:
+            db.session.delete(record) 
+        db.session.commit()
         return "<script>alert('회원가입 성공! 로그인해주세요.'); window.location.href='/login';</script>"
 
     content = """
@@ -679,7 +692,7 @@ def register():
                 <button type="button" onclick="verifyAuthCode()" class="btn" style="width: auto; padding: 0 15px; background-color: #003e21;">인증확인</button>
             </div>
             <div id="auth_status" style="font-size: 0.85rem; margin-bottom: 10px; font-weight: bold;"></div>
-            <input type="text" name="department" placeholder="학과 (예: 글로벌경영학과)" required>
+            <input type="text" name="department" placeholder="학과 (예: 소프트웨어학과)" required>
             <input type="text" name="student_id" placeholder="학번 앞 2자리 (예: 26)" maxlength="2" pattern="\\d{2}" required>
             <div style="margin: 15px 0; padding: 15px; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; font-size: 0.85rem; color: #555;">
                 <p style="margin: 0 0 10px 0; font-weight: bold; color: #333;">[필수] 개인정보 수집 및 이용 동의</p>
@@ -1062,7 +1075,17 @@ def send_code():
         return jsonify({'success': False, 'message': '가입되지 않은 이메일입니다.'})
 
     code = str(random.randint(100000, 999999))
-    verification_codes[email] = code
+    
+    # --- 수정된 부분: DB에 인증번호 저장 ---
+    record = VerificationCode.query.filter_by(email=email).first()
+    if record:
+        record.code = code
+        record.created_at = datetime.utcnow()
+    else:
+        record = VerificationCode(email=email, code=code)
+        db.session.add(record)
+    db.session.commit()
+    # ------------------------------------
 
     SENDER_EMAIL = os.getenv('SENDER_EMAIL')
     APP_PASSWORD = os.getenv('APP_PASSWORD')
@@ -1087,23 +1110,18 @@ def verify_code():
     data = request.get_json()
     email = data.get('email')
     code = data.get('code')
-    if email in verification_codes and verification_codes[email] == code:
+    
+    # --- 수정된 부분: DB에서 인증번호 확인 ---
+    record = VerificationCode.query.filter_by(email=email).first()
+    
+    # (선택사항) 인증 만료 시간 체크를 넣고 싶다면 아래 주석을 활용하세요.
+    # if record and (datetime.utcnow() - record.created_at) > timedelta(minutes=5):
+    #     return jsonify({'success': False, 'message': '❌ 인증 시간이 만료되었습니다. 다시 시도해주세요.'})
+
+    if record and record.code == code:
         return jsonify({'success': True, 'message': '✅ 인증이 완료되었습니다.'})
     else:
         return jsonify({'success': False, 'message': '❌ 인증번호가 일치하지 않거나 만료되었습니다.'})
-
-# [신규] 크롤링 상태 확인 API
-@app.route('/api/crawl_status')
-@login_required
-def crawl_status_api():
-    statuses = CrawlStatus.query.all()
-    return jsonify([{
-        'board_id': s.board_id,
-        'last_crawled': s.last_crawled.isoformat() if s.last_crawled else None,
-        'success': s.last_success,
-        'notice_count': s.notice_count,
-        'error_count': s.error_count
-    } for s in statuses])
 
 
 # ==========================================
