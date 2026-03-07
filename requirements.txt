@@ -1,0 +1,23 @@
+# 성대 공지 알리미 - 필요한 패키지 목록
+# 설치: pip install -r requirements.txt
+
+# 웹 프레임워크
+flask
+flask-sqlalchemy
+flask-login
+
+# 크롤링
+requests
+beautifulsoup4
+lxml
+urllib3
+
+# 환경변수
+python-dotenv
+
+# 푸시 알림 (신규)
+pywebpush
+py-vapid
+
+# 아이콘 생성 (신규, 1회만 필요)
+Pillow

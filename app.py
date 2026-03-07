@@ -3,8 +3,9 @@ import os
 import threading
 import time
 import logging
+import json
 from datetime import datetime
-from flask import Flask, render_template_string, jsonify, request, redirect, url_for
+from flask import Flask, render_template_string, jsonify, request, redirect, url_for, make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -18,6 +19,7 @@ from email.mime.text import MIMEText
 import random
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from pywebpush import webpush, WebPushException
 
 # ==========================================
 # 로깅 설정
@@ -37,6 +39,15 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'default-fallback-key')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///skku_notice.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# ==========================================
+# VAPID 키 설정 (Web Push)
+# ==========================================
+# 최초 1회: python -c "from pywebpush import webpush; from py_vapid import Vapid; v=Vapid(); v.generate_keys(); print('PRIVATE:', v.private_pem()); print('PUBLIC:', v.public_key)"
+# 또는 https://vapidkeys.com/ 에서 생성 후 .env에 저장
+VAPID_PRIVATE_KEY = os.getenv('VAPID_PRIVATE_KEY', '')
+VAPID_PUBLIC_KEY = os.getenv('VAPID_PUBLIC_KEY', '')
+VAPID_CLAIMS = {"sub": "mailto:" + os.getenv('SENDER_EMAIL', 'admin@skku.edu')}
 
 # ==========================================
 # 크롤링 스케줄러 설정값
@@ -107,6 +118,16 @@ class CrawlStatus(db.Model):
     last_success = db.Column(db.Boolean, default=True)
     error_count = db.Column(db.Integer, default=0)      # 연속 실패 횟수
     notice_count = db.Column(db.Integer, default=0)      # 마지막 크롤링 건수
+
+# [신규] 푸시 알림 구독 정보 테이블
+class PushSubscription(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    subscription_json = db.Column(db.Text, nullable=False)  # 브라우저 Push 구독 정보 (JSON)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    is_active = db.Column(db.Boolean, default=True)
+
+    user = db.relationship('User', backref=db.backref('push_subscriptions', lazy='dynamic'))
 
 def is_valid_password(password):
     if len(password) < 8:
@@ -338,6 +359,84 @@ def crawl_board_task(board_id, board_name, board_url, page_param):
     return board_id, board_name, notices
 
 
+def send_push_notification(subscription_json, title, body, url_link=""):
+    """
+    개별 구독자에게 Web Push 알림 발송.
+    실패 시 해당 구독을 비활성화.
+    """
+    if not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+        return False
+    try:
+        payload = json.dumps({
+            "title": title,
+            "body": body,
+            "url": url_link,
+            "icon": "/static/icon-192.png",
+            "badge": "/static/icon-72.png"
+        }, ensure_ascii=False)
+
+        webpush(
+            subscription_info=json.loads(subscription_json),
+            data=payload,
+            vapid_private_key=VAPID_PRIVATE_KEY,
+            vapid_claims=VAPID_CLAIMS
+        )
+        return True
+    except WebPushException as e:
+        logger.warning(f"푸시 발송 실패: {e}")
+        # 410 Gone 또는 404 → 구독 만료/해제
+        if hasattr(e, 'response') and e.response and e.response.status_code in (404, 410):
+            try:
+                sub = PushSubscription.query.filter_by(subscription_json=subscription_json).first()
+                if sub:
+                    sub.is_active = False
+                    db.session.commit()
+            except Exception:
+                pass
+        return False
+    except Exception as e:
+        logger.error(f"푸시 발송 오류: {e}")
+        return False
+
+
+def notify_subscribers_of_new_notices(board_id, new_notices):
+    """
+    특정 게시판의 구독자들에게 새 공지 알림을 보냄.
+    new_notices: 새로 감지된 공지사항 리스트
+    """
+    if not new_notices or not VAPID_PRIVATE_KEY:
+        return
+
+    board = Board.query.filter_by(board_id=board_id).first()
+    if not board:
+        return
+
+    # 이 게시판의 구독자 중 활성 푸시 구독이 있는 사람들
+    subscribers = board.subscribers.all()
+    if not subscribers:
+        return
+
+    for user in subscribers:
+        active_subs = PushSubscription.query.filter_by(
+            user_id=user.id, is_active=True
+        ).all()
+
+        for sub in active_subs:
+            # 새 공지 중 최대 3개까지 알림
+            for notice in new_notices[:3]:
+                title = f"📢 {board.name}"
+                body = notice['title'][:80]
+                send_push_notification(
+                    sub.subscription_json,
+                    title=title,
+                    body=body,
+                    url_link=notice.get('link', '/')
+                )
+
+    count = len(new_notices)
+    logger.info(f"🔔 [{board.name}] 새 공지 {count}건 → {len(subscribers)}명에게 푸시 발송 시도")
+
+
 def run_scheduled_crawl():
     """
     구독자가 1명 이상인 게시판만 크롤링하여 DB에 캐싱.
@@ -377,12 +476,19 @@ def run_scheduled_crawl():
                 # 요청 간 딜레이 (서버 부담 완화)
                 time.sleep(1)
 
-        # DB에 캐시 저장 (한번에 batch로)
+        # DB에 캐시 저장 (한번에 batch로) + 새 공지 감지 → 푸시 알림
         now = datetime.utcnow()
         for board_id, notices in results.items():
+            # 기존 캐시에서 링크 목록을 미리 수집 (새 공지 판별용)
+            existing_links = set(
+                row[0] for row in
+                db.session.query(CachedNotice.link).filter_by(board_id=board_id, page=1).all()
+            )
+
             # 기존 page=1 캐시 삭제
             CachedNotice.query.filter_by(board_id=board_id, page=1).delete()
 
+            new_notices_for_push = []
             for n in notices:
                 cached = CachedNotice(
                     board_id=n['category_id'],
@@ -397,6 +503,10 @@ def run_scheduled_crawl():
                 )
                 db.session.add(cached)
 
+                # 기존에 없던 링크 → 새 공지로 간주
+                if n['link'] not in existing_links and n.get('title', '').startswith(('⚠️', '👉')) is False:
+                    new_notices_for_push.append(n)
+
             # 크롤링 상태 업데이트
             status = CrawlStatus.query.filter_by(board_id=board_id).first()
             if not status:
@@ -409,6 +519,13 @@ def run_scheduled_crawl():
                 status.error_count = 0
             else:
                 status.error_count = (status.error_count or 0) + 1
+
+            # 새 공지가 있으면 푸시 알림 발송 (첫 크롤링 제외: existing_links가 비어있으면 무시)
+            if new_notices_for_push and existing_links:
+                try:
+                    notify_subscribers_of_new_notices(board_id, new_notices_for_push)
+                except Exception as e:
+                    logger.error(f"푸시 알림 발송 오류 [{board_id}]: {e}")
 
         db.session.commit()
         elapsed = time.time() - start_time
@@ -476,9 +593,20 @@ def get_cached_notices(board_id, page=1):
 
 HTML_BASE = """
 <!DOCTYPE html>
-<html>
+<html lang="ko">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>성대 맞춤형 공지 대시보드</title>
+
+    <!-- PWA 메타태그 -->
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#003e21">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="성대공지">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
+
     <style>
         body { font-family: 'Apple SD Gothic Neo', sans-serif; background-color: #f4f7f6; padding: 30px 10px; margin: 0; }
         .container { max-width: 850px; margin: auto; background: white; padding: 30px; border-radius: 20px; box-shadow: 0 5px 20px rgba(0,0,0,0.08); }
@@ -502,6 +630,14 @@ HTML_BASE = """
         .filter-btn:hover { background-color: #d3d9df; }
         .filter-btn.active { background-color: #003e21; color: white; box-shadow: 0 4px 10px rgba(0,62,33,0.3); }
         .crawl-info { text-align: center; font-size: 0.8rem; color: #95a5a6; margin-top: -15px; margin-bottom: 20px; }
+        /* 알림 버튼 스타일 */
+        .notify-btn { background: none; border: 2px solid #003e21; color: #003e21; padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 0.85rem; font-weight: bold; transition: 0.3s; }
+        .notify-btn:hover { background-color: #003e21; color: white; }
+        .notify-btn.active { background-color: #003e21; color: white; }
+        .notify-btn.active:hover { background-color: #c0392b; border-color: #c0392b; }
+        /* 홈화면 추가 안내 배너 */
+        .pwa-install-banner { display: none; background: linear-gradient(135deg, #003e21 0%, #006633 100%); color: white; padding: 12px 20px; border-radius: 10px; margin-bottom: 15px; font-size: 0.85rem; text-align: center; cursor: pointer; }
+        .pwa-install-banner:hover { opacity: 0.9; }
     </style>
 </head>
 <body>
@@ -518,6 +654,219 @@ HTML_BASE = """
         {% endif %}
         [[CONTENT]]
     </div>
+
+    <!-- PWA Service Worker 등록 + 푸시 알림 헬퍼 -->
+    <script>
+    // Service Worker 등록
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js', { scope: '/' })
+            .then(reg => console.log('SW 등록 성공:', reg.scope))
+            .catch(err => console.warn('SW 등록 실패:', err));
+    }
+
+    // VAPID 키를 base64 → Uint8Array 변환
+    function urlBase64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) {
+            outputArray[i] = rawData.charCodeAt(i);
+        }
+        return outputArray;
+    }
+
+    // 푸시 알림 구독
+    async function subscribePush() {
+        try {
+            const permission = await Notification.requestPermission();
+            if (permission !== 'granted') {
+                alert('알림 권한이 거부되었습니다. 브라우저 설정에서 알림을 허용해주세요.');
+                return false;
+            }
+
+            const reg = await navigator.serviceWorker.ready;
+            const keyRes = await fetch('/api/vapid-public-key');
+            const keyData = await keyRes.json();
+
+            if (!keyData.publicKey) {
+                alert('서버에서 푸시 키를 가져올 수 없습니다. 관리자에게 문의해주세요.');
+                return false;
+            }
+
+            const subscription = await reg.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(keyData.publicKey)
+            });
+
+            const res = await fetch('/api/push/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ subscription: subscription.toJSON() })
+            });
+
+            const result = await res.json();
+            if (result.success) {
+                updateNotifyButton(true);
+                return true;
+            }
+            return false;
+        } catch (err) {
+            console.error('푸시 구독 오류:', err);
+            alert('알림 설정 중 오류가 발생했습니다: ' + err.message);
+            return false;
+        }
+    }
+
+    // 푸시 알림 해제
+    async function unsubscribePush() {
+        try {
+            const reg = await navigator.serviceWorker.ready;
+            const subscription = await reg.pushManager.getSubscription();
+            if (subscription) {
+                await subscription.unsubscribe();
+                await fetch('/api/push/unsubscribe', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ endpoint: subscription.endpoint })
+                });
+            }
+            updateNotifyButton(false);
+        } catch (err) {
+            console.error('푸시 해제 오류:', err);
+        }
+    }
+
+    // 알림 버튼 토글
+    async function togglePush() {
+        const btn = document.getElementById('notify-toggle-btn');
+        if (!btn) return;
+        if (btn.classList.contains('active')) {
+            if (confirm('알림을 해제하시겠습니까?')) {
+                await unsubscribePush();
+            }
+        } else {
+            await subscribePush();
+        }
+    }
+
+    // 테스트 알림 발송
+    async function sendTestPush() {
+        const res = await fetch('/api/push/test', { method: 'POST' });
+        const data = await res.json();
+        alert(data.message);
+    }
+
+    // 버튼 UI 업데이트 (모든 알림 버튼을 동기화)
+    function updateNotifyButton(isActive) {
+        const btnIds = [
+            'notify-toggle-btn',
+            'notify-toggle-btn-ios',
+            'notify-toggle-btn-android',
+            'notify-toggle-btn-android-sa'
+        ];
+        btnIds.forEach(id => {
+            const btn = document.getElementById(id);
+            if (!btn) return;
+            if (isActive) {
+                btn.classList.add('active');
+                btn.textContent = '🔔 알림 ON';
+            } else {
+                btn.classList.remove('active');
+                btn.textContent = '🔕 알림 받기';
+            }
+        });
+    }
+
+    // 기기/브라우저 감지
+    function detectPlatform() {
+        const ua = navigator.userAgent;
+        const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        const isAndroid = /Android/.test(ua);
+        const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+        const hasPush = 'serviceWorker' in navigator && 'PushManager' in window;
+        return { isIOS, isAndroid, isStandalone, hasPush };
+    }
+
+    // 서버에서 푸시 구독 상태를 가져와 버튼 반영
+    async function syncPushButton() {
+        try {
+            const res = await fetch('/api/push/status');
+            const data = await res.json();
+            updateNotifyButton(data.subscribed);
+        } catch (e) {
+            console.warn('푸시 상태 확인 실패:', e);
+        }
+    }
+
+    // 초기 상태 체크 + 기기별 적절한 가이드 표시
+    async function checkPushStatus() {
+        const guide = document.getElementById('notification-guide');
+        if (!guide) return;
+
+        const { isIOS, isAndroid, isStandalone, hasPush } = detectPlatform();
+
+        guide.style.display = 'block';
+
+        if (isIOS && !isStandalone) {
+            // 아이폰 + Safari 브라우저 (홈화면 추가 전)
+            document.getElementById('guide-ios-not-installed').style.display = 'block';
+
+        } else if (isIOS && isStandalone) {
+            // 아이폰 + 홈화면 앱으로 접속
+            document.getElementById('guide-ios-installed').style.display = 'block';
+            if (hasPush) await syncPushButton();
+
+        } else if (isAndroid && isStandalone) {
+            // 안드로이드 + 홈화면 앱으로 접속
+            document.getElementById('guide-android-standalone').style.display = 'block';
+            if (hasPush) await syncPushButton();
+
+        } else if (isAndroid && !isStandalone) {
+            // 안드로이드 + 브라우저에서 접속
+            document.getElementById('guide-android-browser').style.display = 'block';
+            if (hasPush) await syncPushButton();
+
+        } else if (!hasPush) {
+            // 알림 미지원 브라우저
+            document.getElementById('guide-unsupported').style.display = 'block';
+
+        } else {
+            // PC (Chrome, Edge, Firefox 등)
+            document.getElementById('guide-pc').style.display = 'block';
+            await syncPushButton();
+        }
+    }
+
+    // 홈화면 추가 안내 (Android / PC)
+    let deferredPrompt = null;
+    window.addEventListener('beforeinstallprompt', e => {
+        e.preventDefault();
+        deferredPrompt = e;
+        const banner = document.getElementById('pwa-install-banner');
+        if (banner) banner.style.display = 'block';
+    });
+
+    function installPWA() {
+        if (deferredPrompt) {
+            deferredPrompt.prompt();
+            deferredPrompt.userChoice.then(choice => {
+                deferredPrompt = null;
+                document.getElementById('pwa-install-banner').style.display = 'none';
+            });
+        } else {
+            const { isIOS } = detectPlatform();
+            if (isIOS) {
+                alert('Safari 하단의 공유 버튼(📤)을 눌러\\n"홈 화면에 추가"를 선택해주세요!');
+            } else {
+                alert('브라우저 메뉴에서 "홈 화면에 추가" 또는\\n"앱 설치"를 선택해주세요!');
+            }
+        }
+    }
+
+    // 페이지 로드 후 상태 체크
+    document.addEventListener('DOMContentLoaded', checkPushStatus);
+    </script>
 </body>
 </html>
 """
@@ -828,6 +1177,114 @@ def home():
     </style>
 
     <h1>{{ current_user.username }}'s 실시간 공지🔊</h1>
+
+    <!-- PWA 설치 + 알림 안내 통합 배너 -->
+    <div id="notification-guide" style="display:none; background:#f8f9fa; border:1px solid #dee2e6; border-radius:12px; padding:18px; margin-bottom:18px; font-size:0.88rem; line-height:1.6;">
+
+        <!-- ===== PC 사용자용 ===== -->
+        <div id="guide-pc" style="display:none;">
+            <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                <div>
+                    <b>🔔 새 공지 알림을 받아보세요!</b><br>
+                    <span style="color:#666;">구독한 게시판에 새 공지가 올라오면 자동으로 알려드려요.</span>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <button id="notify-toggle-btn" class="notify-btn" onclick="togglePush()">🔕 알림 받기</button>
+                    <button class="notify-btn" onclick="sendTestPush()" style="font-size:0.8rem; padding:5px 10px;" title="알림이 잘 오는지 테스트">테스트</button>
+                </div>
+            </div>
+            <p style="margin:10px 0 0; color:#888; font-size:0.8rem;">💻 Chrome, Edge, Firefox에서 사용 가능해요.</p>
+        </div>
+
+        <!-- ===== 안드로이드 사용자용 (브라우저에서 접속) ===== -->
+        <div id="guide-android-browser" style="display:none;">
+            <b>📱 안드로이드에서 알림 받는 법</b>
+            <div style="background:white; border-radius:8px; padding:14px; margin-top:10px; border:1px solid #eee;">
+                <div style="margin-bottom:8px;"><b>Step 1.</b> 아래 <b>"🔕 알림 받기"</b> 버튼을 눌러주세요</div>
+                <div style="margin-bottom:8px;"><b>Step 2.</b> <b>"알림 허용"</b> 팝업이 뜨면 허용을 눌러주세요</div>
+                <div><b>Step 3.</b> 끝! 새 공지가 올라오면 자동으로 알림이 와요 🎉</div>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center; margin-top:12px;">
+                <button id="notify-toggle-btn-android" class="notify-btn" onclick="togglePush()">🔕 알림 받기</button>
+                <button class="notify-btn" onclick="sendTestPush()" style="font-size:0.8rem; padding:5px 10px;">테스트</button>
+            </div>
+            <div style="margin-top:12px; padding:10px; background:#eef6ff; border-radius:6px; font-size:0.82rem; color:#555;">
+                <b>💡 팁:</b> 홈 화면에 추가하면 앱처럼 바로 접속할 수 있어요!<br>
+                Chrome: 우측 상단 <b>⋮</b> 메뉴 → <b>"홈 화면에 추가"</b> 또는 <b>"앱 설치"</b>
+            </div>
+            <p style="margin:8px 0 0; color:#888; font-size:0.8rem;">✅ Chrome, Edge, Samsung Internet, Firefox 등 대부분 브라우저에서 지원돼요.</p>
+        </div>
+
+        <!-- ===== 안드로이드 사용자용 (홈화면 앱에서 접속) ===== -->
+        <div id="guide-android-standalone" style="display:none;">
+            <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                <div>
+                    <b>🎉 앱으로 접속 중이에요!</b><br>
+                    <span style="color:#666;">알림 버튼을 눌러 새 공지 알림을 받아보세요.</span>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <button id="notify-toggle-btn-android-sa" class="notify-btn" onclick="togglePush()">🔕 알림 받기</button>
+                    <button class="notify-btn" onclick="sendTestPush()" style="font-size:0.8rem; padding:5px 10px;">테스트</button>
+                </div>
+            </div>
+            <p style="margin:8px 0 0; color:#888; font-size:0.8rem;">
+                ⚠️ 알림이 안 오면: 설정 → 앱 → 배터리 최적화에서 브라우저를 <b>"제한 없음"</b>으로 변경해주세요.
+            </p>
+        </div>
+
+        <!-- ===== iOS 사용자용 (Safari 브라우저에서 접속, 홈화면 추가 전) ===== -->
+        <div id="guide-ios-not-installed" style="display:none;">
+            <b>🍎 아이폰에서 알림을 받으려면?</b>
+            <div style="background:white; border-radius:8px; padding:14px; margin-top:10px; border:1px solid #eee;">
+                <div style="margin-bottom:8px;"><b>Step 1.</b> 반드시 <b>Safari</b>로 이 페이지에 접속해주세요</div>
+                <div style="margin-bottom:8px;"><b>Step 2.</b> 하단의 <b>공유 버튼</b>(📤)을 탭하세요</div>
+                <div style="margin-bottom:8px;"><b>Step 3.</b> <b>"홈 화면에 추가"</b>를 선택하세요</div>
+                <div><b>Step 4.</b> 홈 화면에서 앱을 열고 알림 버튼을 눌러주세요!</div>
+            </div>
+            <p style="margin:10px 0 0; color:#e67e22; font-size:0.82rem;">
+                ⚠️ iOS 16.4 이상 + Safari에서 홈화면에 추가해야만 알림을 받을 수 있어요.<br>
+                ❌ Chrome, Edge 등 다른 브라우저에서는 홈화면에 추가해도 알림이 작동하지 않아요.
+            </p>
+        </div>
+
+        <!-- ===== iOS 사용자용 (홈화면 앱에서 접속 = standalone 모드) ===== -->
+        <div id="guide-ios-installed" style="display:none;">
+            <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                <div>
+                    <b>🎉 홈 화면 앱으로 접속 중이에요!</b><br>
+                    <span style="color:#666;">아래 버튼을 눌러 알림을 활성화하세요.</span>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <button id="notify-toggle-btn-ios" class="notify-btn" onclick="togglePush()">🔕 알림 받기</button>
+                    <button class="notify-btn" onclick="sendTestPush()" style="font-size:0.8rem; padding:5px 10px;">테스트</button>
+                </div>
+            </div>
+            <p style="margin:8px 0 0; color:#888; font-size:0.8rem;">
+                알림 설정은 아이폰 <b>설정 → 알림</b>에서도 관리할 수 있어요.
+            </p>
+        </div>
+
+        <!-- ===== 알림 미지원 브라우저 ===== -->
+        <div id="guide-unsupported" style="display:none;">
+            <b>😢 이 브라우저에서는 알림을 지원하지 않아요</b>
+            <p style="margin:8px 0 0; color:#666;">
+                <b>안드로이드:</b> Chrome, Edge, Samsung Internet 등을 사용해주세요.<br>
+                <b>아이폰:</b> Safari로 접속 후 홈화면에 추가해주세요.<br>
+                <b>PC:</b> Chrome 또는 Edge를 사용해주세요.
+            </p>
+        </div>
+
+        <!-- 닫기 버튼 -->
+        <div style="text-align:right; margin-top:8px;">
+            <button onclick="this.closest('#notification-guide').style.display='none'" style="background:none; border:none; color:#aaa; cursor:pointer; font-size:0.8rem;">닫기 ✕</button>
+        </div>
+    </div>
+
+    <!-- Android/PC용 홈화면 설치 안내 (beforeinstallprompt 지원 시에만 표시) -->
+    <div id="pwa-install-banner" class="pwa-install-banner" onclick="installPWA()">
+        📲 홈 화면에 추가하면 앱처럼 편리하게 사용할 수 있어요! (탭하여 설치)
+    </div>
+
     <p class="crawl-info" style="color: #7f8c8d; font-size: 0.85rem; text-align: center; margin-bottom: 20px;">마지막 업데이트: {{ last_updated }}</p>
 
     <div class="btn-group">
@@ -1055,6 +1512,213 @@ def trigger_crawl():
     # 별도 스레드에서 즉시 실행
     threading.Thread(target=run_scheduled_crawl, daemon=True).start()
     return "<script>alert('크롤링이 백그라운드에서 시작되었습니다. 잠시 후 새로고침해주세요.'); window.location.href='/admin';</script>"
+
+# ==========================================
+# PWA: manifest.json / service-worker / push 구독 API
+# ==========================================
+
+@app.route('/manifest.json')
+def manifest():
+    manifest_data = {
+        "name": "성대 공지 알리미",
+        "short_name": "성대공지",
+        "description": "성균관대학교 맞춤형 공지사항 알림 서비스",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#f4f7f6",
+        "theme_color": "#003e21",
+        "orientation": "portrait-primary",
+        "icons": [
+            {"src": "/static/icon-72.png", "sizes": "72x72", "type": "image/png"},
+            {"src": "/static/icon-96.png", "sizes": "96x96", "type": "image/png"},
+            {"src": "/static/icon-128.png", "sizes": "128x128", "type": "image/png"},
+            {"src": "/static/icon-144.png", "sizes": "144x144", "type": "image/png"},
+            {"src": "/static/icon-152.png", "sizes": "152x152", "type": "image/png"},
+            {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/static/icon-384.png", "sizes": "384x384", "type": "image/png"},
+            {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+        ]
+    }
+    response = make_response(json.dumps(manifest_data, ensure_ascii=False))
+    response.headers['Content-Type'] = 'application/manifest+json'
+    return response
+
+
+@app.route('/sw.js')
+def service_worker():
+    sw_code = """
+// 성대 공지 알리미 Service Worker
+const CACHE_NAME = 'skku-notice-v1';
+const OFFLINE_URL = '/offline';
+
+// 설치: 기본 리소스 캐시
+self.addEventListener('install', event => {
+    self.skipWaiting();
+});
+
+// 활성화: 이전 캐시 정리
+self.addEventListener('activate', event => {
+    event.waitUntil(clients.claim());
+});
+
+// 푸시 알림 수신
+self.addEventListener('push', event => {
+    let data = { title: '성대 공지 알리미', body: '새 공지사항이 등록되었습니다.' };
+
+    if (event.data) {
+        try {
+            data = event.data.json();
+        } catch (e) {
+            data.body = event.data.text();
+        }
+    }
+
+    const options = {
+        body: data.body || '',
+        icon: data.icon || '/static/icon-192.png',
+        badge: data.badge || '/static/icon-72.png',
+        vibrate: [200, 100, 200],
+        data: { url: data.url || '/' },
+        actions: [
+            { action: 'open', title: '확인하기' },
+            { action: 'close', title: '닫기' }
+        ],
+        tag: 'skku-notice',
+        renotify: true
+    };
+
+    event.waitUntil(
+        self.registration.showNotification(data.title || '성대 공지 알리미', options)
+    );
+});
+
+// 알림 클릭 시 해당 페이지로 이동
+self.addEventListener('notificationclick', event => {
+    event.notification.close();
+
+    const targetUrl = event.notification.data?.url || '/';
+
+    if (event.action === 'close') return;
+
+    event.waitUntil(
+        clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
+            // 이미 열려 있는 탭이 있으면 포커스
+            for (const client of clientList) {
+                if (client.url.includes(self.location.origin) && 'focus' in client) {
+                    client.navigate(targetUrl);
+                    return client.focus();
+                }
+            }
+            // 없으면 새 탭 열기
+            return clients.openWindow(targetUrl);
+        })
+    );
+});
+"""
+    response = make_response(sw_code)
+    response.headers['Content-Type'] = 'application/javascript'
+    response.headers['Service-Worker-Allowed'] = '/'
+    return response
+
+
+@app.route('/api/vapid-public-key')
+def vapid_public_key():
+    """프론트엔드에서 VAPID 공개키를 가져가는 API"""
+    return jsonify({'publicKey': VAPID_PUBLIC_KEY})
+
+
+@app.route('/api/push/subscribe', methods=['POST'])
+@login_required
+def push_subscribe():
+    """브라우저 Push 구독 정보를 서버에 저장"""
+    data = request.get_json()
+    subscription = data.get('subscription')
+    if not subscription:
+        return jsonify({'success': False, 'message': '구독 정보가 없습니다.'}), 400
+
+    sub_json = json.dumps(subscription, ensure_ascii=False)
+
+    # 중복 방지: 같은 유저 + 같은 endpoint면 업데이트
+    existing = PushSubscription.query.filter_by(user_id=current_user.id).all()
+    for ex in existing:
+        try:
+            ex_data = json.loads(ex.subscription_json)
+            if ex_data.get('endpoint') == subscription.get('endpoint'):
+                ex.subscription_json = sub_json
+                ex.is_active = True
+                ex.created_at = datetime.utcnow()
+                db.session.commit()
+                return jsonify({'success': True, 'message': '알림이 갱신되었습니다.'})
+        except (json.JSONDecodeError, AttributeError):
+            continue
+
+    new_sub = PushSubscription(
+        user_id=current_user.id,
+        subscription_json=sub_json,
+        is_active=True
+    )
+    db.session.add(new_sub)
+    db.session.commit()
+    return jsonify({'success': True, 'message': '알림이 활성화되었습니다! 🔔'})
+
+
+@app.route('/api/push/unsubscribe', methods=['POST'])
+@login_required
+def push_unsubscribe():
+    """푸시 알림 구독 해제"""
+    data = request.get_json()
+    endpoint = data.get('endpoint', '')
+
+    subs = PushSubscription.query.filter_by(user_id=current_user.id, is_active=True).all()
+    count = 0
+    for sub in subs:
+        try:
+            sub_data = json.loads(sub.subscription_json)
+            if not endpoint or sub_data.get('endpoint') == endpoint:
+                sub.is_active = False
+                count += 1
+        except (json.JSONDecodeError, AttributeError):
+            sub.is_active = False
+            count += 1
+    db.session.commit()
+    return jsonify({'success': True, 'message': f'알림이 해제되었습니다. ({count}건)'})
+
+
+@app.route('/api/push/status')
+@login_required
+def push_status():
+    """현재 유저의 푸시 구독 상태 확인"""
+    active_count = PushSubscription.query.filter_by(
+        user_id=current_user.id, is_active=True
+    ).count()
+    return jsonify({'subscribed': active_count > 0, 'count': active_count})
+
+
+@app.route('/api/push/test', methods=['POST'])
+@login_required
+def push_test():
+    """푸시 알림 테스트 발송"""
+    subs = PushSubscription.query.filter_by(
+        user_id=current_user.id, is_active=True
+    ).all()
+
+    if not subs:
+        return jsonify({'success': False, 'message': '활성화된 알림 구독이 없습니다.'})
+
+    success_count = 0
+    for sub in subs:
+        if send_push_notification(
+            sub.subscription_json,
+            title="🔔 테스트 알림",
+            body="성대 공지 알리미 푸시 알림이 정상 작동 중입니다!",
+            url_link="/"
+        ):
+            success_count += 1
+
+    return jsonify({
+        'success': success_count > 0,
+        'message': f'테스트 알림 발송 완료 ({success_count}/{len(subs)})'
+    })
 
 # ==========================================
 # 이메일 인증 API (기존 유지)
