@@ -621,17 +621,17 @@ HTML_BASE = """
         .form-container { max-width: 400px; margin: auto; }
         ul { list-style: none; padding: 0; margin: 0; }
 
-        /* ===== 공지 리스트: 2줄 레이아웃 (모바일 최적화) ===== */
-        li.notice-item { padding: 12px 6px; border-bottom: 1px solid #eee; transition: background 0.2s; }
+        /* ===== 공지 리스트: 3줄 레이아웃 (태그 → 제목 → 메타) ===== */
+        li.notice-item { padding: 12px 8px; border-bottom: 1px solid #eee; transition: background 0.2s; }
         li.notice-item:hover { background-color: #f1f8f4; }
-        .notice-row-top { display: flex; align-items: flex-start; gap: 8px; }
-        .notice-row-top .tag { flex-shrink: 0; margin-top: 2px; }
-        .notice-row-top a { flex: 1; min-width: 0; text-decoration: none; color: #333; font-weight: 500; word-break: keep-all; overflow-wrap: break-word; line-height: 1.5; font-size: 0.92rem; }
-        .notice-row-bottom { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 5px; padding-right: 2px; }
+        .notice-row-tag { margin-bottom: 5px; display: flex; align-items: center; gap: 6px; }
+        .notice-row-title { margin-bottom: 4px; }
+        .notice-row-title a { text-decoration: none; color: #333; font-weight: 500; word-break: keep-all; overflow-wrap: break-word; line-height: 1.45; font-size: 0.93rem; display: block; }
+        .notice-row-meta { display: flex; align-items: center; gap: 6px; }
 
-        .tag { font-size: 0.7rem; font-weight: bold; padding: 3px 7px; border-radius: 6px; background-color: #e9ecef; color: #2d3436; white-space: nowrap; }
-        .badge-new { background-color: #ff7675; color: white; font-size: 0.6rem; padding: 2px 5px; border-radius: 4px; margin-left: 4px; vertical-align: middle; }
-        .meta-info { font-size: 0.78rem; color: #7f8c8d; white-space: nowrap; display: flex; gap: 6px; align-items: center; }
+        .tag { font-size: 0.68rem; font-weight: bold; padding: 2px 7px; border-radius: 6px; background-color: #e9ecef; color: #2d3436; white-space: nowrap; }
+        .badge-new { background-color: #ff7675; color: white; font-size: 0.6rem; padding: 1px 5px; border-radius: 4px; margin-left: 2px; vertical-align: middle; }
+        .meta-info { font-size: 0.78rem; color: #95a5a6; white-space: nowrap; display: flex; gap: 6px; align-items: center; }
 
         .checkbox-group { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
         .checkbox-group label { background: #f8f9fa; padding: 15px; border-radius: 8px; cursor: pointer; border: 1px solid #dee2e6;}
@@ -656,9 +656,10 @@ HTML_BASE = """
             h1 { font-size: 1.15rem; }
             .nav a { padding: 4px 9px; font-size: 0.72rem; }
             .filter-btn { padding: 6px 10px; font-size: 0.75rem; }
-            .tag { font-size: 0.63rem; padding: 2px 5px; }
-            li.notice-item { padding: 10px 4px; }
-            .notice-row-top a { font-size: 0.88rem; }
+            .tag { font-size: 0.62rem; padding: 2px 5px; }
+            li.notice-item { padding: 10px 5px; }
+            .notice-row-title a { font-size: 0.88rem; }
+            .meta-info { font-size: 0.73rem; }
         }
     </style>
 </head>
@@ -1319,11 +1320,14 @@ def home():
     <ul id="notice-list">
         {% for notice in notices %}
             <li class="notice-item {{ notice.category_id }}">
-                <div class="notice-row-top">
+                <div class="notice-row-tag">
                     <span class="tag tag-{{ notice.category_id }}">{{ notice.category_name }}</span>
-                    <a href="{{ notice.link }}" target="_blank">{{ notice.title }}{% if notice.is_new %} <span class="badge-new">NEW</span>{% endif %}</a>
+                    {% if notice.is_new %}<span class="badge-new">NEW</span>{% endif %}
                 </div>
-                <div class="notice-row-bottom">
+                <div class="notice-row-title">
+                    <a href="{{ notice.link }}" target="_blank">{{ notice.title }}</a>
+                </div>
+                <div class="notice-row-meta">
                     <div class="meta-info">
                         {% if notice.views %}
                             <span>👁️ {{ notice.views }}</span> <span style="color:#ddd;">|</span>
@@ -1385,11 +1389,14 @@ def home():
                         const newBadge = notice.is_new ? ` <span class="badge-new">NEW</span>` : '';
                         const viewsHtml = notice.views ? `<span>👁️ ${notice.views}</span> <span style="color:#ddd;">|</span> ` : '';
                         li.innerHTML = `
-                            <div class="notice-row-top">
+                            <div class="notice-row-tag">
                                 <span class="tag tag-${notice.category_id}">${notice.category_name}</span>
-                                <a href="${notice.link}" target="_blank">${notice.title}${newBadge}</a>
+                                ${newBadge}
                             </div>
-                            <div class="notice-row-bottom">
+                            <div class="notice-row-title">
+                                <a href="${notice.link}" target="_blank">${notice.title}</a>
+                            </div>
+                            <div class="notice-row-meta">
                                 <div class="meta-info">${viewsHtml}<span>${notice.date}</span></div>
                             </div>
                         `;
