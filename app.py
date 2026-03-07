@@ -1196,7 +1196,6 @@ def home():
         .load-more-btn { background-color: #003e21; color: white; border: none; padding: 10px 30px; border-radius: 30px; font-size: 1rem; font-weight: bold; cursor: pointer; transition: 0.3s; box-shadow: 0 4px 10px rgba(0,62,33,0.3); }
         .load-more-btn:hover { background-color: #002815; transform: translateY(-2px); }
         .load-more-btn:disabled { background-color: #95a5a6; cursor: not-allowed; transform: none; box-shadow: none; }
-        .meta-info { font-size: 0.85rem; color: #7f8c8d; white-space: nowrap; margin-left: 10px; display: flex; gap: 8px; align-items: center; }
     </style>
 
     <h1>{{ current_user.username }}'s 실시간 공지🔊</h1>
@@ -1356,7 +1355,7 @@ def home():
             btnElement.classList.add('active');
             const items = document.querySelectorAll('.notice-item');
             items.forEach(item => {
-                item.style.display = (categoryId === 'all' || item.classList.contains(categoryId)) ? 'flex' : 'none';
+                item.style.display = (categoryId === 'all' || item.classList.contains(categoryId)) ? 'block' : 'none';
             });
             document.getElementById('load-more-container').style.display = categoryId === 'all' ? 'none' : 'block';
         }
