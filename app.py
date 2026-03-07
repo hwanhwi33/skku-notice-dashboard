@@ -608,36 +608,58 @@ HTML_BASE = """
     <link rel="apple-touch-icon" href="/static/icon-192.png">
 
     <style>
-        body { font-family: 'Apple SD Gothic Neo', sans-serif; background-color: #f4f7f6; padding: 30px 10px; margin: 0; }
-        .container { max-width: 850px; margin: auto; background: white; padding: 30px; border-radius: 20px; box-shadow: 0 5px 20px rgba(0,0,0,0.08); }
-        h1 { color: #003e21; text-align: center; border-bottom: 2px solid #003e21; padding-bottom: 15px; margin-bottom: 25px; }
-        .nav { text-align: right; margin-bottom: 20px; }
-        .nav a { color: #003e21; text-decoration: none; font-weight: bold; margin-left: 15px; border: 1px solid #003e21; padding: 5px 15px; border-radius: 20px;}
+        * { box-sizing: border-box; }
+        body { font-family: 'Apple SD Gothic Neo', -apple-system, BlinkMacSystemFont, sans-serif; background-color: #f4f7f6; padding: 15px 8px; margin: 0; }
+        .container { max-width: 850px; margin: auto; background: white; padding: 20px 15px; border-radius: 20px; box-shadow: 0 5px 20px rgba(0,0,0,0.08); }
+        h1 { color: #003e21; text-align: center; border-bottom: 2px solid #003e21; padding-bottom: 15px; margin-bottom: 20px; font-size: 1.4rem; }
+        .nav { margin-bottom: 20px; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+        .nav span { margin-right: auto; font-size: 0.88rem; }
+        .nav a { color: #003e21; text-decoration: none; font-weight: bold; border: 1px solid #003e21; padding: 5px 12px; border-radius: 20px; font-size: 0.8rem; white-space: nowrap; }
         .nav a:hover { background-color: #003e21; color: white; }
         input[type="text"], input[type="password"] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box;}
         button.btn { width: 100%; padding: 10px; background-color: #003e21; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px;}
         .form-container { max-width: 400px; margin: auto; }
         ul { list-style: none; padding: 0; margin: 0; }
-        li { padding: 15px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 10px; transition: 0.2s; }
-        li:hover { background-color: #f1f8f4; transform: translateX(5px); }
-        li a { text-decoration: none; color: #333; font-weight: 500; flex-grow: 1; }
-        .tag { font-size: 0.75rem; font-weight: bold; padding: 4px 8px; border-radius: 6px; background-color: #e9ecef; color: #2d3436; white-space: nowrap; }
-        .badge-new { background-color: #ff7675; color: white; font-size: 0.65rem; padding: 2px 5px; border-radius: 4px; margin-left: 8px;}
+
+        /* ===== 공지 리스트: 2줄 레이아웃 (모바일 최적화) ===== */
+        li.notice-item { padding: 12px 6px; border-bottom: 1px solid #eee; transition: background 0.2s; }
+        li.notice-item:hover { background-color: #f1f8f4; }
+        .notice-row-top { display: flex; align-items: flex-start; gap: 8px; }
+        .notice-row-top .tag { flex-shrink: 0; margin-top: 2px; }
+        .notice-row-top a { flex: 1; min-width: 0; text-decoration: none; color: #333; font-weight: 500; word-break: keep-all; overflow-wrap: break-word; line-height: 1.5; font-size: 0.92rem; }
+        .notice-row-bottom { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 5px; padding-right: 2px; }
+
+        .tag { font-size: 0.7rem; font-weight: bold; padding: 3px 7px; border-radius: 6px; background-color: #e9ecef; color: #2d3436; white-space: nowrap; }
+        .badge-new { background-color: #ff7675; color: white; font-size: 0.6rem; padding: 2px 5px; border-radius: 4px; margin-left: 4px; vertical-align: middle; }
+        .meta-info { font-size: 0.78rem; color: #7f8c8d; white-space: nowrap; display: flex; gap: 6px; align-items: center; }
+
         .checkbox-group { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
         .checkbox-group label { background: #f8f9fa; padding: 15px; border-radius: 8px; cursor: pointer; border: 1px solid #dee2e6;}
-        .btn-group { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-bottom: 20px; }
-        .filter-btn { padding: 8px 16px; border: none; border-radius: 30px; background-color: #e9ecef; color: #495057; font-weight: bold; cursor: pointer; transition: 0.3s; font-size: 0.9rem; }
+        .btn-group { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 20px; }
+        .filter-btn { padding: 7px 14px; border: none; border-radius: 30px; background-color: #e9ecef; color: #495057; font-weight: bold; cursor: pointer; transition: 0.3s; font-size: 0.82rem; }
         .filter-btn:hover { background-color: #d3d9df; }
         .filter-btn.active { background-color: #003e21; color: white; box-shadow: 0 4px 10px rgba(0,62,33,0.3); }
         .crawl-info { text-align: center; font-size: 0.8rem; color: #95a5a6; margin-top: -15px; margin-bottom: 20px; }
-        /* 알림 버튼 스타일 */
-        .notify-btn { background: none; border: 2px solid #003e21; color: #003e21; padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 0.85rem; font-weight: bold; transition: 0.3s; }
+        /* 알림 버튼 */
+        .notify-btn { background: none; border: 2px solid #003e21; color: #003e21; padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 0.85rem; font-weight: bold; transition: 0.3s; white-space: nowrap; }
         .notify-btn:hover { background-color: #003e21; color: white; }
         .notify-btn.active { background-color: #003e21; color: white; }
         .notify-btn.active:hover { background-color: #c0392b; border-color: #c0392b; }
-        /* 홈화면 추가 안내 배너 */
+        /* 홈화면 추가 배너 */
         .pwa-install-banner { display: none; background: linear-gradient(135deg, #003e21 0%, #006633 100%); color: white; padding: 12px 20px; border-radius: 10px; margin-bottom: 15px; font-size: 0.85rem; text-align: center; cursor: pointer; }
         .pwa-install-banner:hover { opacity: 0.9; }
+
+        /* 모바일 세부 조정 */
+        @media (max-width: 600px) {
+            body { padding: 6px 3px; }
+            .container { padding: 14px 10px; border-radius: 14px; }
+            h1 { font-size: 1.15rem; }
+            .nav a { padding: 4px 9px; font-size: 0.72rem; }
+            .filter-btn { padding: 6px 10px; font-size: 0.75rem; }
+            .tag { font-size: 0.63rem; padding: 2px 5px; }
+            li.notice-item { padding: 10px 4px; }
+            .notice-row-top a { font-size: 0.88rem; }
+        }
     </style>
 </head>
 <body>
@@ -1297,15 +1319,17 @@ def home():
     <ul id="notice-list">
         {% for notice in notices %}
             <li class="notice-item {{ notice.category_id }}">
-                <span class="tag tag-{{ notice.category_id }}">{{ notice.category_name }}</span>
-                <a href="{{ notice.link }}" target="_blank">{{ notice.title }}
-                    {% if notice.is_new %}<span class="badge-new">NEW</span>{% endif %}
-                </a>
-                <div class="meta-info">
-                    {% if notice.views %}
-                        <span>👁️ {{ notice.views }}</span> <span style="color:#ddd;">|</span>
-                    {% endif %}
-                    <span>{{ notice.date }}</span>
+                <div class="notice-row-top">
+                    <span class="tag tag-{{ notice.category_id }}">{{ notice.category_name }}</span>
+                    <a href="{{ notice.link }}" target="_blank">{{ notice.title }}{% if notice.is_new %} <span class="badge-new">NEW</span>{% endif %}</a>
+                </div>
+                <div class="notice-row-bottom">
+                    <div class="meta-info">
+                        {% if notice.views %}
+                            <span>👁️ {{ notice.views }}</span> <span style="color:#ddd;">|</span>
+                        {% endif %}
+                        <span>{{ notice.date }}</span>
+                    </div>
                 </div>
             </li>
         {% endfor %}
@@ -1358,12 +1382,16 @@ def home():
                         existingKeys.add(key);
                         const li = document.createElement('li');
                         li.className = `notice-item ${notice.category_id}`;
-                        const newBadge = notice.is_new ? `<span class="badge-new">NEW</span>` : '';
+                        const newBadge = notice.is_new ? ` <span class="badge-new">NEW</span>` : '';
                         const viewsHtml = notice.views ? `<span>👁️ ${notice.views}</span> <span style="color:#ddd;">|</span> ` : '';
                         li.innerHTML = `
-                            <span class="tag tag-${notice.category_id}">${notice.category_name}</span>
-                            <a href="${notice.link}" target="_blank">${notice.title} ${newBadge}</a>
-                            <div class="meta-info">${viewsHtml}<span>${notice.date}</span></div>
+                            <div class="notice-row-top">
+                                <span class="tag tag-${notice.category_id}">${notice.category_name}</span>
+                                <a href="${notice.link}" target="_blank">${notice.title}${newBadge}</a>
+                            </div>
+                            <div class="notice-row-bottom">
+                                <div class="meta-info">${viewsHtml}<span>${notice.date}</span></div>
+                            </div>
                         `;
                         list.appendChild(li);
                         newCount++;
